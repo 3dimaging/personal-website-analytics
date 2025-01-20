@@ -11,17 +11,7 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configure CORS for GitHub Pages
-CORS(app, resources={
-    r"/api/*": {
-        "origins": [
-            "http://localhost:8000",
-            "http://127.0.0.1:8000",
-            "https://3dimaging.github.io"
-        ],
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
-    }
-})
+CORS(app)
 
 # Get the environment
 ENV = os.getenv('FLASK_ENV', 'production')
@@ -38,6 +28,10 @@ else:
     app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_pre_ping': True,
+    'pool_recycle': 300,
+}
 
 db = SQLAlchemy(app)
 
@@ -57,6 +51,97 @@ class Event(db.Model):
 # Create tables
 with app.app_context():
     db.create_all()
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({'status': 'ok', 'message': 'Analytics API is running'}), 200
+
+@app.route('/api/track-visit', methods=['POST'])
+def track_visit():
+    try:
+        data = request.json
+        visit = Visit(
+            is_mobile=data.get('isMobile', False),
+            screen_resolution=data.get('screenResolution', 'unknown')
+        )
+        db.session.add(visit)
+        db.session.commit()
+        return jsonify({'status': 'success'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+    finally:
+        db.session.close()
+
+@app.route('/api/track-event', methods=['POST'])
+def track_event():
+    try:
+        data = request.json
+        event = Event(
+            event_type=data.get('type'),
+            event_data=data.get('data')
+        )
+        db.session.add(event)
+        db.session.commit()
+        return jsonify({'status': 'success'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+    finally:
+        db.session.close()
+
+@app.route('/api/analytics', methods=['GET'])
+def get_analytics():
+    try:
+        visits = Visit.query.all()
+        events = Event.query.all()
+        
+        analytics_data = {
+            'total_visits': len(visits),
+            'mobile_visits': sum(1 for v in visits if v.is_mobile),
+            'desktop_visits': sum(1 for v in visits if not v.is_mobile),
+            'events': [{'type': e.event_type, 'data': e.event_data} for e in events]
+        }
+        
+        return jsonify(analytics_data), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+    finally:
+        db.session.close()
+
+@app.route('/dashboard')
+def dashboard():
+    try:
+        visits = Visit.query.order_by(Visit.timestamp).all()
+        
+        # Calculate basic stats
+        total_visits = len(visits)
+        mobile_visits = sum(1 for v in visits if v.is_mobile)
+        desktop_visits = total_visits - mobile_visits
+
+        # Prepare visit data for the time series chart
+        from collections import defaultdict
+        
+        visit_dates = defaultdict(int)
+        for visit in visits:
+            date_str = visit.timestamp.strftime('%Y-%m-%d')
+            visit_dates[date_str] += 1
+        
+        # Sort dates and prepare data for the chart
+        sorted_dates = sorted(visit_dates.keys())
+        visit_counts = [visit_dates[date] for date in sorted_dates]
+
+        return render_template_string(DASHBOARD_HTML,
+            total_visits=total_visits,
+            mobile_visits=mobile_visits,
+            desktop_visits=desktop_visits,
+            visit_dates=sorted_dates,
+            visit_counts=visit_counts
+        )
+    except Exception as e:
+        return str(e), 500
+    finally:
+        db.session.close()
 
 # HTML template for the dashboard
 DASHBOARD_HTML = """
@@ -203,92 +288,8 @@ DASHBOARD_HTML = """
 </html>
 """
 
-@app.route('/')
-def home():
-    return jsonify({'status': 'ok', 'message': 'Analytics API is running'}), 200
-
-@app.route('/api/track-visit', methods=['POST'])
-def track_visit():
-    try:
-        data = request.json
-        visit = Visit(
-            is_mobile=data.get('isMobile', False),
-            screen_resolution=data.get('screenResolution', 'unknown')
-        )
-        db.session.add(visit)
-        db.session.commit()
-        return jsonify({'status': 'success'}), 200
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/api/track-event', methods=['POST'])
-def track_event():
-    try:
-        data = request.json
-        event = Event(
-            event_type=data.get('type'),
-            event_data=data.get('data')
-        )
-        db.session.add(event)
-        db.session.commit()
-        return jsonify({'status': 'success'}), 200
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/api/analytics', methods=['GET'])
-def get_analytics():
-    try:
-        visits = Visit.query.all()
-        events = Event.query.all()
-        
-        analytics_data = {
-            'total_visits': len(visits),
-            'mobile_visits': sum(1 for v in visits if v.is_mobile),
-            'desktop_visits': sum(1 for v in visits if not v.is_mobile),
-            'events': [{'type': e.event_type, 'data': e.event_data} for e in events]
-        }
-        
-        return jsonify(analytics_data), 200
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/dashboard')
-def dashboard():
-    try:
-        visits = Visit.query.order_by(Visit.timestamp).all()
-        
-        # Calculate basic stats
-        total_visits = len(visits)
-        mobile_visits = sum(1 for v in visits if v.is_mobile)
-        desktop_visits = total_visits - mobile_visits
-
-        # Prepare visit data for the time series chart
-        from collections import defaultdict
-        from datetime import datetime
-        
-        visit_dates = defaultdict(int)
-        for visit in visits:
-            date_str = visit.timestamp.strftime('%Y-%m-%d')
-            visit_dates[date_str] += 1
-        
-        # Sort dates and prepare data for the chart
-        sorted_dates = sorted(visit_dates.keys())
-        visit_counts = [visit_dates[date] for date in sorted_dates]
-
-        return render_template_string(
-            DASHBOARD_HTML,
-            total_visits=total_visits,
-            mobile_visits=mobile_visits,
-            desktop_visits=desktop_visits,
-            visit_dates=sorted_dates,
-            visit_counts=visit_counts
-        )
-    except Exception as e:
-        return str(e), 500
-
 # Vercel requires a handler function
-def handler(event, context):
-    return app(event, context)
+app.debug = ENV == 'development'
 
-if __name__ == '__main__':
-    app.run(debug=ENV=='development')
+def handler(event, context):
+    return app
