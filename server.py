@@ -30,7 +30,12 @@ ENV = os.getenv('FLASK_ENV', 'production')
 if ENV == 'development':
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///analytics.db'
 else:
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+    # Get DATABASE_URL from environment variable
+    database_url = os.getenv('DATABASE_URL')
+    # Modify the URL for SQLAlchemy if it starts with postgres://
+    if database_url and database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://', 1)
+    app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -52,6 +57,10 @@ class Event(db.Model):
 # Create tables
 with app.app_context():
     db.create_all()
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({'status': 'ok', 'message': 'Analytics API is running'}), 200
 
 @app.route('/api/track-visit', methods=['POST'])
 def track_visit():
@@ -97,6 +106,10 @@ def get_analytics():
         return jsonify(analytics_data), 200
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# Vercel requires a handler function
+def handler(event, context):
+    return app(event, context)
 
 if __name__ == '__main__':
     app.run(debug=ENV=='development')
